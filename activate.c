@@ -24,6 +24,13 @@
  * This file contains the code to communicate a selected distribution / mapping
  * of interrupts to the kernel.
  */
+#ifdef __NetBSD__
+#include <sys/param.h>
+#include <sys/sysctl.h>
+#include <stdbool.h>
+#include <err.h>
+#undef ALIGN
+#endif
 #include "config.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,15 +38,46 @@
 #include <stdint.h>
 
 #include "irqbalance.h"
+#ifdef __NetBSD__
+#include "intrctl_io.h"
+#endif
+
+static int intrctl_io_alloc_retry_count = 4;
 
 static int check_affinity(struct irq_info *info, cpumask_t applied_mask)
 {
 	cpumask_t current_mask;
+#ifdef __NetBSD__
+	void *handle;
+	struct intrio_list_line *illine;
+	int i, ncpu, assigned = -1;
+#else
 	char buf[PATH_MAX];
 	char *line = NULL;
 	size_t size = 0;
 	FILE *file;
+#endif
 
+#ifdef __NetBSD__
+	handle = intrctl_io_alloc(intrctl_io_alloc_retry_count);
+	if (handle == NULL)
+		err(EXIT_FAILURE, "intrctl_io_alloc");
+
+	ncpu = intrctl_io_ncpus(handle);
+	illine = intrctl_io_firstline(handle);
+	for (; illine != NULL; illine = intrctl_io_nextline(handle, illine)) {
+		if (strncmp(info->name, illine->ill_intrid, sizeof(illine->ill_intrid)) == 0) {
+			struct intrio_list_line_cpu *illcpu;
+			illcpu = illine->ill_cpu;
+			for (i = 0; i < ncpu; i++) {
+				if (illcpu[i].illc_assigned)
+					assigned = i;
+			}
+		}
+	}
+	cpus_clear(current_mask);
+	cpu_set(assigned, current_mask);
+#else
 	sprintf(buf, "/proc/irq/%i/smp_affinity", info->irq);
 	file = fopen(buf, "r");
 	if (!file)
@@ -52,14 +90,21 @@ static int check_affinity(struct irq_info *info, cpumask_t applied_mask)
 	cpumask_parse_user(line, strlen(line), current_mask);
 	fclose(file);
 	free(line);
+#endif
 
 	return cpus_equal(applied_mask, current_mask);
 }
 
 static void activate_mapping(struct irq_info *info, void *data __attribute__((unused)))
 {
+#ifdef __NetBSD__
+	void *handle;
+	cpuset_t *cpuset;
+	struct intrio_set iset;
+#else
 	char buf[PATH_MAX];
 	FILE *file;
+#endif
 	cpumask_t applied_mask;
 	int valid_mask = 0;
 
@@ -107,6 +152,26 @@ static void activate_mapping(struct irq_info *info, void *data __attribute__((un
 	if (!info->assigned_obj)
 		return;
 
+
+#ifdef __NetBSD__
+	handle = intrctl_io_alloc(intrctl_io_alloc_retry_count);
+	if (handle == NULL)
+		err(EXIT_FAILURE, "intrctl_io_alloc");
+
+	cpuset = cpuset_create();
+	if (cpuset == NULL)
+		err(EXIT_FAILURE, "create_cpuset()");
+
+	strlcpy(iset.intrid, info->name, INTRIDBUF);
+
+	cpuset_zero(cpuset);
+	cpuset_set(first_cpu(applied_mask), cpuset);
+	iset.cpuset = cpuset;
+	iset.cpuset_size = cpuset_size(cpuset);
+	if (sysctlbyname("kern.intr.affinity", NULL, NULL, &iset, sizeof(iset)) < 0)
+		err(EXIT_FAILURE, "sysctl kern.intr.affinity");
+	cpuset_destroy(cpuset);
+#else
 	sprintf(buf, "/proc/irq/%i/smp_affinity", info->irq);
 	file = fopen(buf, "w");
 	if (!file)
@@ -115,6 +180,8 @@ static void activate_mapping(struct irq_info *info, void *data __attribute__((un
 	cpumask_scnprintf(buf, PATH_MAX, applied_mask);
 	fprintf(file, "%s", buf);
 	fclose(file);
+#endif
+
 	info->moved = 0; /*migration is done*/
 }
 

@@ -28,9 +28,12 @@
 #include <syslog.h>
 #include <ctype.h>
 #include <errno.h>
+#include <stdbool.h>
+#include <err.h>
 
 #include "cpumask.h"
 #include "irqbalance.h"
+#include "intrctl_io.h"
 
 #ifdef AARCH64
 #include <sys/types.h>
@@ -42,6 +45,8 @@
 
 static int proc_int_has_msi = 0;
 static int msi_found_in_sysfs = 0;
+
+int intrctl_io_alloc_retry_count = 4;
 
 #ifdef AARCH64
 struct irq_match {
@@ -141,6 +146,39 @@ static void guess_arm_irq_hints(char *name, struct irq_info *info)
 }
 #endif
 
+#ifdef __NetBSD__
+GList* collect_full_irq_list()
+{
+	GList *tmp_list = NULL;
+	void *handle;
+	struct intrio_list_line *illine;
+	int i;
+
+	handle = intrctl_io_alloc(intrctl_io_alloc_retry_count);
+	if (handle == NULL)
+		err(EXIT_FAILURE, "intrctl_io_alloc");
+
+	illine = intrctl_io_firstline(handle);
+	i = 1;
+	for (; illine != NULL; illine = intrctl_io_nextline(handle, illine), i++) {
+		struct irq_info *info;
+
+		info = calloc(sizeof(struct irq_info), 1);
+		if (info) {
+			info->irq = i;
+			info->hint_policy = global_hint_policy;
+			info->type = IRQ_TYPE_LEGACY;
+			info->class = IRQ_OTHER;
+			info->name = strdup(illine->ill_intrid);
+			tmp_list = g_list_append(tmp_list, info);
+		}
+	}
+
+	intrctl_io_free(handle);
+
+	return tmp_list;
+}
+#else
 GList* collect_full_irq_list()
 {
 	GList *tmp_list = NULL;
@@ -226,6 +264,7 @@ GList* collect_full_irq_list()
 	free(line);
 	return tmp_list;
 }
+#endif
 
 void parse_proc_interrupts(void)
 {
@@ -454,9 +493,14 @@ void parse_proc_stat(void)
 		if (cpu_isset(cpunr, banned_cpus))
 			continue;
 
+#if 1
+		/* XXXX What value should NetBSD set? */
+		irq_load = softirq_load = 0;
+#else
 		rc = sscanf(line, "%*s %*u %*u %*u %*u %*u %llu %llu", &irq_load, &softirq_load);
 		if (rc < 2)
 			break;	
+#endif
 
 		cpu = find_cpu_core(cpunr);
 

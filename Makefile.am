@@ -27,10 +27,10 @@ EXTRA_DIST = COPYING autogen.sh misc/irqbalance.service misc/irqbalance.env
 AM_CFLAGS = $(LIBCAP_NG_CFLAGS) $(GLIB_CFLAGS)
 AM_CPPFLAGS = -I${top_srcdir} -W -Wall -Wshadow -Wformat -Wundef -D_GNU_SOURCE
 noinst_HEADERS = bitmap.h constants.h cpumask.h irqbalance.h non-atomic.h \
-	types.h
+	types.h intrctl_io.h
 sbin_PROGRAMS = irqbalance
 irqbalance_SOURCES = activate.c bitmap.c classify.c cputree.c irqbalance.c \
-	irqlist.c numa.c placement.c procinterrupts.c
+	irqlist.c numa.c placement.c procinterrupts.c intrctl_io.c
 irqbalance_LDADD = $(LIBCAP_NG_LIBS) $(GLIB_LIBS)
 dist_man_MANS = irqbalance.1
 

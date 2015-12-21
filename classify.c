@@ -6,10 +6,15 @@
 #include <dirent.h>
 #include <assert.h>
 #include <errno.h>
+#include <stdbool.h>
+#include <err.h>
 
 #include "irqbalance.h"
 #include "types.h"
 
+#include "intrctl_io.h"
+
+extern int intrctl_io_alloc_retry_count;
 
 char *classes[] = {
 	"other",
@@ -236,6 +241,10 @@ static int get_pci_info(const char *devpath, struct pci_info *pci)
 /* Return IRQ class for given devpath */
 static int get_irq_class(const char *devpath)
 {
+#if __NetBSD__
+	/* XXXX */
+	return IRQ_LEGACY;
+#else
 	int irq_class = IRQ_NODEF;
 	struct pci_info pci;
 
@@ -255,6 +264,7 @@ static int get_irq_class(const char *devpath)
 	apply_pci_quirks(&pci, &irq_class);
 
 	return irq_class;
+#endif
 }
 
 static gint compare_ints(gconstpointer a, gconstpointer b)
@@ -379,6 +389,8 @@ static struct irq_info *add_one_irq_to_db(const char *devpath, int irq, struct u
 	new->irq = irq;
 	new->class = IRQ_OTHER;
 	new->hint_policy = pol->hintpolicy; 
+	// XXXX
+	new->name = strdup(devpath);
 
 	interrupts_db = g_list_append(interrupts_db, new);
 
@@ -675,12 +687,14 @@ static void build_one_dev_entry(const char *dirname, GList *tmp_irqs)
 		return;
 	}
 
+#ifndef __NetBSD__
 	sprintf(path, "%s/%s/irq", SYSDEV_DIR, dirname);
 	fd = fopen(path, "r");
 	if (!fd)
 		return;
 	if (fscanf(fd, "%d", &irqnum) < 0)
 		goto done;
+#endif
 
 	/*
 	 * no pci device has irq 0
@@ -775,14 +789,35 @@ static void add_missing_irq(struct irq_info *info, void *attr)
 
 void rebuild_irq_db(void)
 {
+#ifdef __NetBSD__
+	struct intrio_list_line *illine;
+	void *handle;
+	int i;
+#else
 	DIR *devdir;
 	struct dirent *entry;
+#endif
 	GList *tmp_irqs = NULL;
 
 	free_irq_db();
 
 	tmp_irqs = collect_full_irq_list();
 
+#ifdef __NetBSD__
+	handle = intrctl_io_alloc(intrctl_io_alloc_retry_count);
+	if (handle == NULL)
+		err(EXIT_FAILURE, "intrctl_io_alloc");
+
+	illine = intrctl_io_firstline(handle);
+	i = 1;
+	for (; illine != NULL; illine = intrctl_io_nextline(handle, illine), i++) {
+		struct user_irq_policy pol;
+		get_irq_user_policy(illine->ill_intrid, i, &pol);
+		add_one_irq_to_db(illine->ill_intrid, i, &pol);
+	}
+
+	intrctl_io_free(handle);
+#else
 	devdir = opendir(SYSDEV_DIR);
 	if (!devdir)
 		goto free;
@@ -798,6 +833,7 @@ void rebuild_irq_db(void)
 	} while (entry != NULL);
 
 	closedir(devdir);
+#endif
 
 
 	for_each_irq(tmp_irqs, add_missing_irq, interrupts_db);

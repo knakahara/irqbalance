@@ -33,11 +33,13 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <stdbool.h>
+#include <err.h>
 
 #include <glib.h>
 
 #include "irqbalance.h"
-
+#include "intrctl_io.h"
 
 GList *cpus;
 GList *cache_domains;
@@ -46,6 +48,8 @@ GList *packages;
 int package_count;
 int cache_domain_count;
 int core_count;
+
+extern int intrctl_io_alloc_retry_count;
 
 /* Users want to be able to keep interrupts away from some cpus; store these in a cpumask_t */
 cpumask_t banned_cpus;
@@ -202,6 +206,72 @@ static struct topo_obj* add_cpu_to_cache_domain(struct topo_obj *cpu,
 	return cache;
 }
  
+#ifdef __NetBSD__
+static void do_one_cpu(int cpuno)
+{
+	struct topo_obj *cpu;
+	cpumask_t cache_mask, package_mask;
+	struct topo_obj *cache;
+	struct topo_obj *package;
+	int nodeid;
+	int packageid = 0;
+
+	cpu = calloc(sizeof(struct topo_obj), 1);
+	if (!cpu)
+		return;
+
+	cpu->obj_type = OBJ_TYPE_CPU;
+
+	cpu->number = cpuno;
+
+	cpu_set(cpu->number, cpu_possible_map);
+
+	cpu_set(cpu->number, cpu->mask);
+
+	/*
+ 	 * Default the cache_domain mask to be equal to the cpu
+ 	 */
+	cpus_clear(cache_mask);
+	cpu_set(cpu->number, cache_mask);
+
+	/* if the cpu is on the banned list, just don't add it */
+	if (cpus_intersects(cpu->mask, banned_cpus)) {
+		free(cpu);
+		/* even though we don't use the cpu we do need to count it */
+		core_count++;
+		return;
+	}
+
+
+	cpus_clear(package_mask);
+	cpu_set(0, package_mask);
+	packageid = 0;
+
+	/* try to read the cache mask; if it doesn't exist assume solitary */
+	/* We want the deepest cache level available */
+	cpu_set(cpu->number, cache_mask);
+
+	nodeid=-1;
+
+	/*
+	   blank out the banned cpus from the various masks so that interrupts
+	   will never be told to go there
+	 */
+	cpus_and(cache_mask, cache_mask, unbanned_cpus);
+	cpus_and(package_mask, package_mask, unbanned_cpus);
+	char __buf[4096];
+	cpumask_scnprintf(__buf, 4095, package_mask);
+	cache = add_cpu_to_cache_domain(cpu, cache_mask);
+	package = add_cache_domain_to_package(cache, packageid, package_mask);
+	add_package_to_node(package, nodeid);
+
+
+
+	cpu->obj_type_list = &cpus;
+	cpus = g_list_append(cpus, cpu);
+	core_count++;
+}
+#else
 static void do_one_cpu(char *path)
 {
 	struct topo_obj *cpu;
@@ -343,6 +413,7 @@ static void do_one_cpu(char *path)
 	cpus = g_list_append(cpus, cpu);
 	core_count++;
 }
+#endif
 
 static void dump_irq(struct irq_info *info, void *data)
 {
@@ -421,7 +492,31 @@ void clear_work_stats(void)
 	for_each_object(numa_nodes, clear_obj_stats, NULL);
 }
 
+#ifdef __NetBSD__
+void parse_cpu_tree(void)
+{
+	void *handle;
+	int i, ncpu;
 
+	setup_banned_cpus();
+
+	cpus_complement(unbanned_cpus, banned_cpus);
+
+	handle = intrctl_io_alloc(intrctl_io_alloc_retry_count);
+	if (handle == NULL)
+		err(EXIT_FAILURE, "intrctl_io_alloc");
+
+	ncpu = intrctl_io_ncpus(handle);
+	for (i = 0; i < ncpu; i++) {
+		do_one_cpu(i);
+	}
+
+	if (debug_mode)
+		dump_tree();
+
+	intrctl_io_free(handle);
+}
+#else
 void parse_cpu_tree(void)
 {
 	DIR *dir;
@@ -456,6 +551,7 @@ void parse_cpu_tree(void)
 		dump_tree();
 
 }
+#endif
 
 
 /*
